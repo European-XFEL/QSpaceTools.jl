@@ -8,6 +8,7 @@ DimensionalData = "0703355e-b756-11e9-17c0-8b28908087d0"
 HDF5 = "f67ccb44-e63f-5c2f-98bd-6dc0ccc4ba2f"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 OhMyThreads = "67456a42-1dca-4109-a031-0a68de7e3ad5"
+PrecompileTools = "aea7be01-6a6a-4083-8856-8a6e6704d82a"
 StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
 
 [weakdeps]
@@ -20,6 +21,7 @@ QSpaceToolsPythonCallExt = "PythonCall"
 DimensionalData = "0.30"
 HDF5 = "0.17"
 OhMyThreads = "0.8"
+PrecompileTools = "1.3.4"
 PythonCall = "0.9"
 StaticArrays = "1"
 
