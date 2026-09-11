@@ -1,34 +1,19 @@
 """
-PyFAI baked-integrator consumer.
+pyFAI baked-integrator consumer: loads the HDF5 file written by
+`bake_for_batch.write_hdf5` and applies it to a frame or stack of frames.
 
-Loads an HDF5 file from `bake_for_batch.write_hdf5(...)` and applies it
-to a frame or stack of frames. Returns a `DimArray` with axes from
-`bin_centers0` / `bin_centers1` and unit strings in `metadata`.
+Per frame, over finite pixels:
 
-Per-frame math (derived in the exporter docstring):
+    I[bin] = Σ raw_w[p]·X[pix(p)] / Σ corr_w[p]
 
-    I[bin] = (Σ raw_w[p]·X[pix(p)]) / (Σ corr_w[p]·1) over finite pixels
+pyFAI's CSR `(indptr, indices)` are used directly as the `(colptr, rowval)` of
+the transposed CSC after a 1-shift, since `CSC(Aᵀ) ≡ CSR(A)`.
 
-`_fused_spmv!()` walks each bin's NNZ once, accumulating S and N together with
-on-the-fly `isfinite` masking.
-
-The sparse layout is `CSC(Aᵀ) ≡ CSR(A)`: pyFAI's `(indptr, indices)` map
-1:1 onto `(colptr, rowval)` of the transposed CSC after a 1-shift.
-
-Input is an N-dim array whose leading two axes are the (W, H) frame; any
-further axes are treated as scan dimensions and looped over. `DimArray`
-inputs propagate their trailing dims; plain arrays get auto-named `Frame`
-(for one extra dim) or `Dim{:dim_3}, …`.
-
-Output shape:
-    single frame  (W,H)            →  (nbins0,)                 1D
-                                      (nbins1, nbins0)          2D
-    K extra dims  (W,H,d1,…,dK)    →  (nbins0, d1,…,dK)         1D
-                                      (nbins1, nbins0, d1,…,dK) 2D
-
-For 2D, the leading axis is `Azimuthal` because the CSR row layout is
-`row = bin_rad * nbins_azim + bin_azim` (radial-major, C order); reshaping
-that flat layout into Julia's column-major puts azimuth on the fast axis.
+Frames are `(W, H, d_1, …, d_K)`; the trailing dims are looped over and
+propagated to the output, which is `(nbins0, d_1, …)` for 1D and
+`(nbins1, nbins0, d_1, …)` for 2D. Azimuth leads in 2D because the CSR row is
+`bin_rad * nbins_azim + bin_azim`, so a column-major reshape puts it on the
+fast axis.
 """
 
 const Radial    = Dim{:radial}
@@ -43,10 +28,8 @@ frozen CSR sparse matrix and correction weights for either 1D or 2D azimuthal
 integration, along with the bin centres and unit strings for the output axes.
 Construct one with [`load_baked`](@ref) and apply it with [`integrate`](@ref).
 """
-struct BakedIntegrator
-    # CSR of A (≡ CSC of Aᵀ), shape (nbins, npix). `colptr[bin]:colptr[bin+1]-1`
-    # gives each bin's NNZ slice; `rowval` holds 1-based pixel indices into
-    # `vec(frame)`; `raw_nz` and `corr_nz` are the parallel weight arrays.
+@kwdef struct BakedIntegrator
+    # CSR of the (nbins, npix) matrix; `rowval` are 1-based indices into `vec(frame)`.
     colptr::Vector{Int32}
     rowval::Vector{Int32}
     raw_nz::Vector{Float32}
@@ -83,10 +66,8 @@ function Base.hash(b::BakedIntegrator, h::UInt)
     h
 end
 
-# Shared assembly for both `load_baked` methods (HDF5 file here, Python `baked`
-# dict in the PythonCall extension). `get(T, key)::T` pulls one field from the
-# backing store; everything that must stay in lockstep across backends lives
-# here: the +1 index shift, the (H,W)→(W,H) flip, and the 1D/2D field branch.
+# Shared by both `load_baked` methods (HDF5 here, Python dict in the PythonCall
+# extension); `get(T, key)::T` reads one field from the backing store.
 function _baked_from(get)
     ndim    = get(Int, "ndim")
     shape_c = get(Vector{Int}, "shape")
@@ -100,20 +81,25 @@ function _baked_from(get)
         Float32[], "", 0
     end
 
-    # Reversed (W, H) so column-major `vec` matches pyFAI's C-order flat index
-    # without a remap.
-    BakedIntegrator(get(Vector{Int32}, "indptr")  .+ Int32(1),
-                    get(Vector{Int32}, "indices") .+ Int32(1),
-                    get(Vector{Float32}, "data_raw"),
-                    get(Vector{Float32}, "data_corr"),
-                    get(Vector{Float32}, "bin_centers0"),
-                    bin_centers1, (W, H),
-                    get(String, "unit0"), unit1, get(String, "split"),
-                    get(Int, "npt0"), npt1, ndim)
+    # Shape reversed to (W, H) so column-major `vec` matches pyFAI's C-order flat index.
+    BakedIntegrator(;
+        colptr=get(Vector{Int32}, "indptr") .+ Int32(1),
+        rowval=get(Vector{Int32}, "indices") .+ Int32(1),
+        raw_nz=get(Vector{Float32}, "data_raw"),
+        corr_nz=get(Vector{Float32}, "data_corr"),
+        bin_centers0=get(Vector{Float32}, "bin_centers0"),
+        bin_centers1,
+        shape=(W, H),
+        unit0=get(String, "unit0"),
+        unit1,
+        split=get(String, "split"),
+        npt0=get(Int, "npt0"),
+        npt1,
+        ndim,
+    )
 end
 
-# pyFAI scalars/strings are stored as HDF5 attributes; the CSR arrays and bin
-# centers as datasets. `_baked_from`'s accessor dispatches on this split.
+# Stored as HDF5 attributes; everything else is a dataset.
 const _BAKED_ATTRS = ("shape", "ndim", "unit0", "unit1", "split", "npt0", "npt1")
 
 """
@@ -136,10 +122,8 @@ function load_baked(path::AbstractString)
 
         b = _baked_from(get)
 
-        # We don't apply pyFAI's per-frame |raw - dummy| <= delta_dummy mask;
-        # warn if it's set so the user isn't surprised by drift from
-        # `ai.integrate1d`.
-        dummy       = Float32(read_attribute(f, "dummy"))
+        # pyFAI's per-frame |raw - dummy| <= delta_dummy mask is not applied.
+        dummy      = Float32(read_attribute(f, "dummy"))
         delta_dummy = Float32(read_attribute(f, "delta_dummy"))
         if (isfinite(dummy) && dummy != 0) || (isfinite(delta_dummy) && delta_dummy != 0)
             @warn "baked integrator has nonzero pyFAI dummy/delta_dummy; \
@@ -160,10 +144,8 @@ function _meta(b::BakedIntegrator)
     return md
 end
 
-# Wrap a flat output into a DimArray. 2D reshape is zero-copy: row index
-# `bin_rad * npt1 + bin_azim` + column-major puts azimuth fast. Trailing
-# dims (for K ≥ 1 extra post-frame dims) come from a DimArray input via
-# `otherdims`; plain arrays get `Frame` (K==1) or `Dim{:dim_3}, …` (K≥2).
+# Wrap a flat output in a DimArray. Trailing dims come from a DimArray input;
+# plain arrays get `Frame` for one extra dim, `Dim{:dim_3}, …` for more.
 function _wrap(b::BakedIntegrator, out::AbstractArray{Float32}, extra_shape::Tuple, frames)
     nd_frame = length(b.shape)
     trail_dims = if frames isa AbstractDimArray && !isempty(extra_shape)
@@ -202,8 +184,8 @@ function output_size(b::BakedIntegrator, frames::AbstractArray)
     (output_size(b)..., extra_size...)
 end
 
-# Fused single-frame kernel. Each bin's NNZ is walked once; S and N
-# accumulate in scalar registers with on-the-fly `isfinite` masking.
+# Single-frame kernel: numerator and denominator in one walk over each bin's
+# NNZ, masking non-finite pixels on the fly.
 function _fused_spmv!(I::AbstractVector{Float32}, b::BakedIntegrator, x::AbstractVector)
     colptr = b.colptr
     rowval = b.rowval
@@ -259,9 +241,8 @@ end
     integrate!(out::AbstractArray{Float32}, b, frames::AbstractArray;
                scheduler=:static, chunksize=nothing)
 
-Integrate `frames` of shape `(b.shape..., d_1, …, d_K)` into `out` of
-shape `(nbins, d_1, …, d_K)`. Loops the single-frame kernel over the
-extra-dim cartesian indices in parallel via OhMyThreads.
+Integrate `frames` of shape `(b.shape..., d_1, …, d_K)` into `out` of shape
+`(nbins, d_1, …, d_K)`, one frame per task via OhMyThreads.
 """
 function integrate!(out::AbstractArray{Float32}, b::BakedIntegrator, frames::AbstractArray;
                     scheduler::Symbol=:static, chunksize=nothing)
@@ -297,9 +278,8 @@ end
 """
     integrate(b, frames::AbstractArray; scheduler=:static, chunksize=nothing)
 
-Allocate a `(nbins, d_1, …, d_K)` output array (where `d_*` are the extra
-dims of `frames` past the leading `(W, H)` frame axes) and forward to
-`integrate!`. See `integrate!` for the meaning of `scheduler`/`chunksize`.
+Allocate the output with [`allocate_output`](@ref) and forward to
+[`integrate!`](@ref).
 """
 function integrate(b::BakedIntegrator, frames::AbstractArray;
                    scheduler::Symbol=:static, chunksize=nothing)
