@@ -4,8 +4,9 @@ repeated integration in another language (Julia, C++, …) without re-running
 pyFAI's geometry layer per frame.
 
 `npt=int` selects 1D (radial); `npt=(nrad, nazim)` selects 2D, with rows
-packed in radial-major order: `row = bin_rad * nazim + bin_azim` (matches
-pyFAI's `splitBBox_common` `cinsert(i*bins1 + j, ...)`).
+packed as `row = bin_azim * nrad + bin_rad` so that radial is the fastest
+axis. pyFAI's own CSR uses `bin_rad * nazim + bin_azim` (`splitBBox_common`
+`cinsert(i*bins1 + j, ...)`), so the bake reorders the rows.
 
 Assumptions:
   * No variance / error propagation.
@@ -53,8 +54,8 @@ bins fall out as 0/0 → NaN. The detector's static mask is applied at bake
 time (masked pixels never appear in `indices`).
 
 For 2D the math is identical — same matrix, more rows. Reshape the flat
-`(nbins,)` (or `(nbins, B)`) result to `(nrad, nazim)` in numpy or
-`(nazim, nrad, …)` in Julia (column-major); both are zero-copy.
+`(nbins,)` (or `(nbins, B)`) result to `(nazim, nrad)` in numpy (like
+pyFAI's `integrate2d`) or `(nrad, nazim, …)` in Julia; both are zero-copy.
 
 ------------------------------------------------------------------------------
 On-disk layout (HDF5, format_version = 2)
@@ -82,13 +83,12 @@ Attributes:
 import argparse
 
 import numpy as np
-import h5py
 import pyFAI
 from scipy.sparse import csr_matrix
 from pyFAI import units as pyFAI_units
 
 
-FORMAT_VERSION = 1
+FORMAT_VERSION = 2
 
 
 def _split_npt_unit(npt, unit):
@@ -150,9 +150,17 @@ def bake_for_batch(ai, npt, *,
         scale=False,
     )
 
-    data_raw = np.asarray(integ.data, dtype=np.float32)
-    indices = np.asarray(integ.indices, dtype=np.int32)
-    indptr = np.asarray(integ.indptr, dtype=np.int32)
+    A = csr_matrix((integ.data, integ.indices, integ.indptr),
+                   shape=(len(integ.indptr) - 1, npix))
+    if ndim == 2:
+        # pyFAI's rows are `rad * nazim + azim`, reorder them to
+        # `azim * nrad + rad` so that radial is the fastest axis.
+        nrad, nazim = npt_arg
+        A = A[np.arange(nrad * nazim).reshape(nrad, nazim).T.ravel()]
+
+    data_raw = np.asarray(A.data, dtype=np.float32)
+    indices = np.asarray(A.indices, dtype=np.int32)
+    indptr = np.asarray(A.indptr, dtype=np.int32)
 
     # setup_sparse_integrator stores bin centers in S.I. units; rescale to
     # match integrateNd_ng's display axes.
@@ -206,6 +214,7 @@ def bake_for_batch(ai, npt, *,
         # persist the values for the consumer.
         "dummy": np.float32(getattr(ai.detector, "DUMMY", np.nan)),
         "delta_dummy": np.float32(getattr(ai.detector, "DELTA_DUMMY", np.nan)),
+        "format_version": FORMAT_VERSION,
     }
     if ndim == 2:
         out["bin_centers1"] = bin_centers1
@@ -216,6 +225,8 @@ def bake_for_batch(ai, npt, *,
 
 def write_hdf5(baked, path):
     """Write a baked dict to an HDF5 file."""
+    import h5py
+
     with h5py.File(path, "w") as f:
         for key in ("data_raw", "data_corr", "indices", "indptr",
                     "bin_centers0"):
@@ -233,7 +244,7 @@ def write_hdf5(baked, path):
             f.attrs["npt1"] = baked["npt1"]
         f.attrs["dummy"] = baked["dummy"]
         f.attrs["delta_dummy"] = baked["delta_dummy"]
-        f.attrs["format_version"] = FORMAT_VERSION
+        f.attrs["format_version"] = baked["format_version"]
 
 
 def integrate(baked, image):
@@ -248,8 +259,8 @@ def integrate(baked, image):
     Output shape:
       * 1D, single frame    →  (nbins0,)
       * 1D, batch of B      →  (nbins0, B)
-      * 2D, single frame    →  (nbins0, nbins1)
-      * 2D, batch of B      →  (nbins0, nbins1, B)
+      * 2D, single frame    →  (nbins1, nbins0)
+      * 2D, batch of B      →  (nbins1, nbins0, B)
 
     :param baked: the dict returned by `bake_for_batch`
     :param image: 2D detector image, OR 3D batch of shape (B, *shape)
@@ -287,8 +298,8 @@ def integrate(baked, image):
 
     if baked["ndim"] == 2:
         if batch_shape is None:
-            return I.reshape(nbins0, nbins1)
-        return I.reshape(nbins0, nbins1, batch_shape)
+            return I.reshape(nbins1, nbins0)
+        return I.reshape(nbins1, nbins0, batch_shape)
     return I
 
 def main():

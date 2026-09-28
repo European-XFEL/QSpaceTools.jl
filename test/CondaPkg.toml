@@ -1,5 +1,10 @@
 [deps]
 pyfai = ""
+python = "3.13.*"
+h5py = ""
 numpy = ""
 scipy = ""
 xrayutilities = ""
+xarray = ""
+pyjuliacall = ""
+pytest = ""
