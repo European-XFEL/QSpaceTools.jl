@@ -66,7 +66,7 @@ function test_integrator(; shape, npt0, npt1, ndim)
     nbins = ndim == 2 ? npt0 * npt1 : npt0
     QST.BakedIntegrator(
         ones(Int32, nbins + 1), Int32[], Float32[], Float32[],
-        Float32[], Float32[],
+        Float32.(1:npt0), Float32.(1:npt1),
         shape, "", "", "", npt0, npt1, ndim,
     )
 end
@@ -79,6 +79,10 @@ end
     @test size(QST.allocate_output(b2, zeros(8, 6))) == (10, 4)
     @test size(QST.allocate_output(b1, zeros(8, 6, 3, 5))) == (10, 3, 5)
     @test size(QST.allocate_output(b2, zeros(8, 6, 3))) == (10, 4, 3)
+
+    frame = zeros(Float32, 8, 6)
+    @test size(QST.integrate!(QST.allocate_output(b2, frame), b2, frame)) == (10, 4)
+    @test_throws DimensionMismatch QST.integrate!(zeros(Float32, 40), b2, frame)
 end
 
 # Run one pyFAI reference integration (1D or 2D, selected by `ndim`) and
@@ -104,11 +108,10 @@ function check_split(split; ndim, with_pol=false, azimuth_range=nothing)
                        dummy=np.nan, polarization_factor=pol, azimuth_range)
     end
 
-    # 1D intensity is a vector; 2D is (npt_azim, npt_rad), which lines up with
-    # the Julia consumer's (npt1, npt0) output directly.
+    # 2D intensity is (npt_azim, npt_rad) and the Julia output is (npt0, npt1)
     ref_q = pyconvert(Vector, ref.radial)
     ref_I = ndim == 1 ? pyconvert(Vector, ref.intensity) :
-                        pyconvert(Matrix, ref.intensity)
+                        pyconvert(Matrix, ref.intensity.T)
 
     baked = bake_for_batch(ai, npt; unit, split, solidangle=true,
                            polarization_factor=pol, azimuth_range)
@@ -121,7 +124,7 @@ function check_split(split; ndim, with_pol=false, azimuth_range=nothing)
 
     got = parent(QST.integrate(QST.load_baked(baked), jl_frame(image)))
     if ndim == 2
-        @test size(got) == reverse(npt)
+        @test size(got) == npt
     end
 
     compare_result(got, ref_I; rtol=1e-4, atol=1e-4)
@@ -132,7 +135,7 @@ end
 # axis whether the per-frame output is a vector (1D) or matrix (2D).
 function check_batch(npt, seed)
     image, ai = fake_data()
-    b = QST.load_baked(bake_for_batch(ai, npt; unit="2th_deg", split="bbox"))
+    b = QST.BakedIntegrator(ai, npt; unit="2th_deg", split="bbox")
     batch = make_batch(jl_frame(image))
     got_batch = parent(QST.integrate(b, batch))
     @test size(got_batch, ndims(got_batch)) == size(batch, 3)
@@ -180,7 +183,7 @@ end
                          correctSolidAngle=true, dummy=np.nan)
     ref_I = pyconvert(Vector, ref.intensity)
 
-    b = QST.load_baked(bake_for_batch(ai, npt; unit, split="bbox"))
+    b = QST.BakedIntegrator(ai, npt; unit, split="bbox")
     got = parent(QST.integrate(b, jl_frame(poisoned)))
     compare_result(got, ref_I; rtol=1e-4, atol=1e-4)
 end
@@ -196,10 +199,13 @@ end
             write_hdf5(baked, path)
             @test QST.load_baked(path) == QST.load_baked(baked)
         end
+
+        @test QST.BakedIntegrator(ai, npt; unit="2th_deg", split="bbox") == QST.load_baked(baked)
     end
 
     # Check that load_baked(::Py) throws on non-dict inputs
     @test_throws ArgumentError QST.load_baked(np.zeros(3))
+    @test_throws ArgumentError QST.BakedIntegrator(np.zeros(3), 800)
 end
 
 # Small detector + simple goniometer chain, built identically on both sides.

@@ -14,6 +14,37 @@ function QSpaceTools.load_baked(baked::Py)
     QSpaceTools._baked_from((T, key) -> pyconvert(T, baked[key]))
 end
 
+_bake_module::Union{Py, Nothing} = nothing
+
+"""
+    BakedIntegrator(ai::Py, npt; kwargs...)
+
+Bake a pyFAI `AzimuthalIntegrator` in memory. `npt` is the number of radial
+bins for 1D or `(nrad, nazim)` for 2D, and `kwargs` are passed to
+`bake_for_batch()`.
+"""
+function QSpaceTools.BakedIntegrator(ai::Py, npt; kwargs...)
+    # Checked by name so that pyFAI isn't imported for the check
+    is_ai = any(pytype(ai).__mro__) do cls
+        class_fqn(cls) == "pyFAI.integrator.azimuthal.AzimuthalIntegrator"
+    end
+    if !is_ai
+        throw(ArgumentError("BakedIntegrator(::Py) expected a pyFAI AzimuthalIntegrator, got a $(python_fqn(ai))"))
+    end
+
+    # bake_for_batch.py lives at the package root, import it from there
+    if isnothing(_bake_module)
+        path = joinpath(pkgdir(QSpaceTools), "bake_for_batch.py")
+        util = pyimport("importlib.util")
+        spec = util.spec_from_file_location("qspacetools_bake_for_batch", path)
+        mod = util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        global _bake_module = mod
+    end
+
+    QSpaceTools.load_baked(_bake_module.bake_for_batch(ai, npt; kwargs...))
+end
+
 # Function barrier for the zero-copy numpy wrapper `pos`.
 function _lab_positions(pos::AbstractArray, R::QSpaceTools.Mat3,
                         offset::QSpaceTools.Vec3, npix::Int)
@@ -28,7 +59,8 @@ function _lab_positions(pos::AbstractArray, R::QSpaceTools.Mat3,
     return positions
 end
 
-python_fqn(obj::Py) = join(string.([obj.__class__.__module__, python_class(obj)]), ".")
+class_fqn(cls::Py) = join(string.([cls.__module__, cls.__qualname__]), ".")
+python_fqn(obj::Py) = class_fqn(obj.__class__)
 python_class(obj::Py) = string(obj.__class__.__qualname__)
 
 """
@@ -120,18 +152,33 @@ get_py_array(frames::Union{PyIterable, PyArray}) = get_py_array(frames.py)
 
 const py_types = Union{Py, PyIterable, PyArray}
 
-QSpaceTools.rsm(frames::py_types, geom::QSpaceTools.Geometry; kwargs...) = QSpaceTools._rsm(get_py_array(frames), geom; kwargs...)
+# If frames is a PyArray of the right shape then we don't need to do anything
+function get_py_array(frames::py_types, frame_shape::Tuple)
+    if frames isa PyArray && size(frames)[1:length(frame_shape)] == frame_shape
+        frames
+    else
+        get_py_array(frames)
+    end
+end
+
+function QSpaceTools.rsm(frames::py_types, geom::QSpaceTools.Geometry; kwargs...)
+    QSpaceTools._rsm(get_py_array(frames, geom.data_shape), geom; kwargs...)
+end
 
 function QSpaceTools.rsm!(outputs::Union{AbstractArray{Float64, 3}, QSpaceTools.QProjections},
                           frames::py_types,
                           geom::QSpaceTools.Geometry,
                           args...; kwargs...)
-    # If frames is a PyArray of the right shape then we don't need to do anything
-    if !(frames isa PyArray && size(frames)[1:length(geom.data_shape)] == geom.data_shape)
-        frames = get_py_array(frames)
-    end
+    QSpaceTools._rsm!(outputs, get_py_array(frames, geom.data_shape), geom, args...; kwargs...)
+end
 
-    QSpaceTools._rsm!(outputs, frames, geom, args...; kwargs...)
+function QSpaceTools.integrate(b::QSpaceTools.BakedIntegrator, frames::py_types; kwargs...)
+    QSpaceTools._integrate(b, get_py_array(frames, b.shape); kwargs...)
+end
+
+function QSpaceTools.integrate!(out::AbstractArray{Float32}, b::QSpaceTools.BakedIntegrator,
+                                frames::py_types; kwargs...)
+    QSpaceTools._integrate!(out, b, get_py_array(frames, b.shape); kwargs...)
 end
 
 end # module QSpaceToolsPythonCallExt

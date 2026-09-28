@@ -1,19 +1,8 @@
 """
-pyFAI baked-integrator consumer: loads the HDF5 file written by
-`bake_for_batch.write_hdf5` and applies it to a frame or stack of frames.
+Applies an integrator baked by `bake_for_batch.py` to detector frames.
 
-Per frame, over finite pixels:
-
-    I[bin] = Σ raw_w[p]·X[pix(p)] / Σ corr_w[p]
-
-pyFAI's CSR `(indptr, indices)` are used directly as the `(colptr, rowval)` of
-the transposed CSC after a 1-shift, since `CSC(Aᵀ) ≡ CSR(A)`.
-
-Frames are `(W, H, d_1, …, d_K)`; the trailing dims are looped over and
-propagated to the output, which is `(nbins0, d_1, …)` for 1D and
-`(nbins1, nbins0, d_1, …)` for 2D. Azimuth leads in 2D because the CSR row is
-`bin_rad * nbins_azim + bin_azim`, so a column-major reshape puts it on the
-fast axis.
+Frames are `(W, H, extra...)` and the output is `(npt0, extra...)` for 1D and
+`(npt0, npt1, extra...)` for 2D, i.e. radial is the first dimension.
 """
 
 const Radial    = Dim{:radial}
@@ -26,18 +15,20 @@ const Frame     = Dim{:frame}
 An integrator baked from a configured `pyFAI.AzimuthalIntegrator`. Holds the
 frozen CSR sparse matrix and correction weights for either 1D or 2D azimuthal
 integration, along with the bin centres and unit strings for the output axes.
-Construct one with [`load_baked`](@ref) and apply it with [`integrate`](@ref).
+Construct one with [`load_baked`](@ref), or directly from an integrator with
+`BakedIntegrator(ai, npt; kwargs...)` when PythonCall is loaded, and apply it
+with [`integrate`](@ref).
 """
 @kwdef struct BakedIntegrator
-    # CSR of the (nbins, npix) matrix; `rowval` are 1-based indices into `vec(frame)`.
+    # pyFAI's CSR arrays, shifted to 1-based
     colptr::Vector{Int32}
     rowval::Vector{Int32}
     raw_nz::Vector{Float32}
     corr_nz::Vector{Float32}
 
-    bin_centers0::Vector{Float32}            # radial axis (display units)
+    bin_centers0::Vector{Float32}            # radial axis
     bin_centers1::Vector{Float32}            # azimuthal axis (empty for 1D)
-    shape::Tuple{Vararg{Int}}                # frame shape, reverse(python_shape)
+    shape::Tuple{Vararg{Int}}                # (W, H)
     unit0::String
     unit1::String                            # "" for 1D
     split::String
@@ -66,9 +57,21 @@ function Base.hash(b::BakedIntegrator, h::UInt)
     h
 end
 
-# Shared by both `load_baked` methods (HDF5 here, Python dict in the PythonCall
-# extension); `get(T, key)::T` reads one field from the backing store.
+# `get(T, key)` reads one field from an HDF5 file or Python dict.
 function _baked_from(get)
+    version = get(Int, "format_version")
+    if version != 2
+        error("unsupported baked integrator format_version $version, re-bake with the current bake_for_batch.py")
+    end
+
+    dummy = get(Float32, "dummy")
+    delta_dummy = get(Float32, "delta_dummy")
+    if (isfinite(dummy) && dummy != 0) || (isfinite(delta_dummy) && delta_dummy != 0)
+        @warn "baked integrator has nonzero pyFAI dummy/delta_dummy; \
+               these are NOT applied here, so I(q) may differ from \
+               ai.integrate1d on pixels matching the dummy sentinel" dummy delta_dummy
+    end
+
     ndim    = get(Int, "ndim")
     shape_c = get(Vector{Int}, "shape")
     length(shape_c) == 2 ||
@@ -81,7 +84,7 @@ function _baked_from(get)
         Float32[], "", 0
     end
 
-    # Shape reversed to (W, H) so column-major `vec` matches pyFAI's C-order flat index.
+    # Reversed so that `vec(frame)` matches pyFAI's C-order pixel indices
     BakedIntegrator(;
         colptr=get(Vector{Int32}, "indptr") .+ Int32(1),
         rowval=get(Vector{Int32}, "indices") .+ Int32(1),
@@ -100,15 +103,15 @@ function _baked_from(get)
 end
 
 # Stored as HDF5 attributes; everything else is a dataset.
-const _BAKED_ATTRS = ("shape", "ndim", "unit0", "unit1", "split", "npt0", "npt1")
+const _BAKED_ATTRS = ("shape", "ndim", "unit0", "unit1", "split", "npt0", "npt1",
+                      "format_version", "dummy", "delta_dummy")
 
 """
     load_baked(path::AbstractString)
 
 Load a [`BakedIntegrator`](@ref) from an HDF5 file written by
-`bake_for_batch.write_hdf5(...)`. Warns if the bake carries a nonzero pyFAI
-`dummy`/`delta_dummy` sentinel, since that per-frame mask is *not* applied
-here and `I(q)` may then differ from `ai.integrate1d`.
+`bake_for_batch.write_hdf5(...)`. Warns if the bake has a nonzero
+`dummy`/`delta_dummy`, since the dummy mask is not applied.
 """
 function load_baked(path::AbstractString)
     h5open(path, "r") do f
@@ -120,18 +123,7 @@ function load_baked(path::AbstractString)
                 read(f[key])::T
             end
 
-        b = _baked_from(get)
-
-        # pyFAI's per-frame |raw - dummy| <= delta_dummy mask is not applied.
-        dummy      = Float32(read_attribute(f, "dummy"))
-        delta_dummy = Float32(read_attribute(f, "delta_dummy"))
-        if (isfinite(dummy) && dummy != 0) || (isfinite(delta_dummy) && delta_dummy != 0)
-            @warn "baked integrator has nonzero pyFAI dummy/delta_dummy; \
-                   these are NOT applied here, so I(q) may differ from \
-                   ai.integrate1d on pixels matching the dummy sentinel" dummy delta_dummy
-        end
-
-        b
+        _baked_from(get)
     end
 end
 
@@ -144,8 +136,8 @@ function _meta(b::BakedIntegrator)
     return md
 end
 
-# Wrap a flat output in a DimArray. Trailing dims come from a DimArray input;
-# plain arrays get `Frame` for one extra dim, `Dim{:dim_3}, …` for more.
+# Trailing dims are copied from a DimArray input, otherwise they're named
+# `Frame` if there's one or `dim_N` if there's more.
 function _wrap(b::BakedIntegrator, out::AbstractArray{Float32}, extra_shape::Tuple, frames)
     nd_frame = length(b.shape)
     trail_dims = if frames isa AbstractDimArray && !isempty(extra_shape)
@@ -164,8 +156,8 @@ function _wrap(b::BakedIntegrator, out::AbstractArray{Float32}, extra_shape::Tup
                  (Radial(b.bin_centers0), trail_dims...);
                  name=:intensity, metadata=_meta(b))
     else
-        DimArray(reshape(out, b.npt1, b.npt0, extra_shape...),
-                 (Azimuthal(b.bin_centers1), Radial(b.bin_centers0),
+        DimArray(reshape(out, b.npt0, b.npt1, extra_shape...),
+                 (Radial(b.bin_centers0), Azimuthal(b.bin_centers1),
                   trail_dims...);
                  name=:intensity, metadata=_meta(b))
     end
@@ -184,8 +176,7 @@ function output_size(b::BakedIntegrator, frames::AbstractArray)
     (output_size(b)..., extra_size...)
 end
 
-# Single-frame kernel: numerator and denominator in one walk over each bin's
-# NNZ, masking non-finite pixels on the fly.
+# Integrate a single frame, skipping non-finite pixels
 function _fused_spmv!(I::AbstractVector{Float32}, b::BakedIntegrator, x::AbstractVector)
     colptr = b.colptr
     rowval = b.rowval
@@ -219,33 +210,20 @@ function allocate_output(b::BakedIntegrator, frames::AbstractArray)
     Array{Float32}(undef, output_size(b, frames))
 end
 
-"""
-    integrate!(out::AbstractVector{Float32}, b, frame::AbstractMatrix)
-
-Integrate a single frame into the caller-provided `out`. Returns a `DimArray`
-view wrapping `out`.
-"""
-function integrate!(out::AbstractVector{Float32}, b::BakedIntegrator, frame::AbstractMatrix;
-                    scheduler=nothing, chunksize=nothing)
+function _integrate!(out::AbstractArray{Float32}, b::BakedIntegrator, frame::AbstractMatrix;
+                     scheduler=nothing, chunksize=nothing)
     if size(frame) != b.shape
         throw(DimensionMismatch("frame size $(size(frame)) ≠ baked shape $(b.shape)"))
-    elseif size(out) != output_size(b, frame)
-        throw(DimensionMismatch("out length $(length(out)) ≠ nbins = $(b.npt0)"))
+    elseif size(out) != output_size(b)
+        throw(DimensionMismatch("out size $(size(out)) ≠ $(output_size(b))"))
     end
 
-    _fused_spmv!(out, b, vec(frame))
+    _fused_spmv!(vec(out), b, vec(frame))
     _wrap(b, out, (), frame)
 end
 
-"""
-    integrate!(out::AbstractArray{Float32}, b, frames::AbstractArray;
-               scheduler=:static, chunksize=nothing)
-
-Integrate `frames` of shape `(b.shape..., d_1, …, d_K)` into `out` of shape
-`(nbins, d_1, …, d_K)`, one frame per task via OhMyThreads.
-"""
-function integrate!(out::AbstractArray{Float32}, b::BakedIntegrator, frames::AbstractArray;
-                    scheduler::Symbol=:static, chunksize=nothing)
+function _integrate!(out::AbstractArray{Float32}, b::BakedIntegrator, frames::AbstractArray;
+                     scheduler::Symbol=:static, chunksize=nothing)
     nd_frame = length(b.shape)
     input_frame_size = size(frames)[1:nd_frame]
     extra_shape = size(frames)[nd_frame + 1:end]
@@ -276,13 +254,26 @@ function integrate!(out::AbstractArray{Float32}, b::BakedIntegrator, frames::Abs
 end
 
 """
+    integrate!(out::AbstractArray{Float32}, b, frames::AbstractArray;
+               scheduler=:static, chunksize=nothing)
+
+Integrate `frames` of shape `(b.shape..., d_1, …, d_K)` into `out` of shape
+`(output_size(b)..., d_1, …, d_K)`, one frame per task via OhMyThreads. A
+single frame is integrated on the calling task. Returns a `DimArray` view
+wrapping `out`.
+"""
+integrate!(args...; kwargs...) = _integrate!(args...; kwargs...)
+
+function _integrate(b::BakedIntegrator, frames::AbstractArray;
+                    scheduler::Symbol=:static, chunksize=nothing)
+    out = allocate_output(b, frames)
+    _integrate!(out, b, frames; scheduler, chunksize)
+end
+
+"""
     integrate(b, frames::AbstractArray; scheduler=:static, chunksize=nothing)
 
 Allocate the output with [`allocate_output`](@ref) and forward to
 [`integrate!`](@ref).
 """
-function integrate(b::BakedIntegrator, frames::AbstractArray;
-                   scheduler::Symbol=:static, chunksize=nothing)
-    out = allocate_output(b, frames)
-    integrate!(out, b, frames; scheduler, chunksize)
-end
+integrate(args...; kwargs...) = _integrate(args...; kwargs...)
