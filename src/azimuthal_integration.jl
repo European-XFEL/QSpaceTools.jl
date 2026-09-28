@@ -1,8 +1,9 @@
 """
 Applies an integrator baked by `bake_for_batch.py` to detector frames.
 
-Frames are `(W, H, extra...)` and the output is `(npt0, extra...)` for 1D and
-`(npt0, npt1, extra...)` for 2D, i.e. radial is the first dimension.
+Frames are `(x, y, frame...)`, or `(x, y, module, frame...)` for a multi-module
+detector baked as `(x, module * y)`. The output is `(npt0, frame...)` for 1D
+and `(npt0, npt1, frame...)` for 2D, i.e. radial is the first dimension.
 """
 
 const Radial    = Dim{:radial}
@@ -138,8 +139,8 @@ end
 
 # Trailing dims are copied from a DimArray input, otherwise they're named
 # `Frame` if there's one or `dim_N` if there's more.
-function _wrap(b::BakedIntegrator, out::AbstractArray{Float32}, extra_shape::Tuple, frames)
-    nd_frame = length(b.shape)
+function _wrap(b::BakedIntegrator, out::AbstractArray{Float32}, extra_shape::Tuple, frames,
+               nd_frame::Int)
     trail_dims = if frames isa AbstractDimArray && !isempty(extra_shape)
         otherdims(frames, ntuple(identity, nd_frame))
     elseif isempty(extra_shape)
@@ -171,15 +172,56 @@ Calculate the size of the output array needed for `integrate!(out, b, frames)`.
 output_size(b::BakedIntegrator) = b.ndim == 2 ? (b.npt0, b.npt1) : (b.npt0,)
 
 function output_size(b::BakedIntegrator, frames::AbstractArray)
-    nd_frame = length(b.shape)
-    extra_size = size(frames)[nd_frame + 1:end]
+    extra_size = size(frames)[_checked_frame_ndims(b, size(frames)) + 1:end]
     (output_size(b)..., extra_size...)
 end
 
+# Length of the shortest prefix of `sz` that starts with `x` and flattens to
+# `b.shape`, or `nothing`.
+function _frame_ndims(b::BakedIntegrator, sz::Dims)
+    npix = prod(b.shape)
+    if !isempty(sz) && sz[1] == b.shape[1]
+        p = 1
+        for (i, s) in enumerate(sz)
+            p *= s
+            if p == npix
+                return i
+            end
+        end
+    end
+
+    return nothing
+end
+
+function _checked_frame_ndims(b::BakedIntegrator, sz::Dims)
+    nd = _frame_ndims(b, sz)
+    if isnothing(nd)
+        throw(DimensionMismatch("frame size $sz does not start with dims flattening to baked shape $(b.shape)"))
+    end
+
+    return nd
+end
+
+# `strides` throws on arrays that aren't strided
+function _is_contiguous(A::AbstractArray)
+    s = try
+        strides(A)
+    catch e
+        if e isa ArgumentError || e isa MethodError
+            return false
+        end
+        rethrow()
+    end
+
+    return s == cumprod((1, size(A)[1:end-1]...))
+end
+
+_offset(I::CartesianIndex, s::Tuple) = sum((Tuple(I) .- 1) .* s; init=0)
+
 # Integrate a single frame, skipping non-finite pixels
-function _fused_spmv!(I::AbstractVector{Float32}, b::BakedIntegrator, x::AbstractVector)
+function _fused_spmv!(I::AbstractVector{Float32}, b::BakedIntegrator,
+                      rowval::AbstractVector{<:Integer}, x::AbstractVector, offset::Int)
     colptr = b.colptr
-    rowval = b.rowval
     raw_nz = b.raw_nz
     corr_nz = b.corr_nz
 
@@ -188,8 +230,7 @@ function _fused_spmv!(I::AbstractVector{Float32}, b::BakedIntegrator, x::Abstrac
         n = 0.0
 
         for p in colptr[bin]:colptr[bin+1]-1
-            pix = rowval[p]
-            v   = x[pix]
+            v   = x[rowval[p] + offset]
             ok  = isfinite(v)
 
             s = muladd(raw_nz[p],  ifelse(ok, v,   0.0), s)
@@ -210,57 +251,69 @@ function allocate_output(b::BakedIntegrator, frames::AbstractArray)
     Array{Float32}(undef, output_size(b, frames))
 end
 
-function _integrate!(out::AbstractArray{Float32}, b::BakedIntegrator, frame::AbstractMatrix;
-                     scheduler=nothing, chunksize=nothing)
-    if size(frame) != b.shape
-        throw(DimensionMismatch("frame size $(size(frame)) ≠ baked shape $(b.shape)"))
-    elseif size(out) != output_size(b)
-        throw(DimensionMismatch("out size $(size(out)) ≠ $(output_size(b))"))
-    end
-
-    _fused_spmv!(vec(out), b, vec(frame))
-    _wrap(b, out, (), frame)
-end
-
 function _integrate!(out::AbstractArray{Float32}, b::BakedIntegrator, frames::AbstractArray;
                      scheduler::Symbol=:static, chunksize=nothing)
-    nd_frame = length(b.shape)
-    input_frame_size = size(frames)[1:nd_frame]
-    extra_shape = size(frames)[nd_frame + 1:end]
-
     if ndims(frames) == 1
         throw(ArgumentError("A vector was passed as `frame`, but it needs to be a 2D array with shape $(b.shape)"))
-    elseif input_frame_size != b.shape
-        throw(DimensionMismatch("frame size $(size(frames)[1:nd_frame]) ≠ baked shape $(b.shape)"))
-    elseif size(out) != output_size(b, frames)
-        throw(DimensionMismatch("out size $(size(out)) ≠ (nbins, extra...) = $(output_size(b, frames))"))
+    end
+    nd_frame = _checked_frame_ndims(b, size(frames))
+    extra_shape = size(frames)[nd_frame + 1:end]
+    expected_size = (output_size(b)..., extra_shape...)
+    if size(out) != expected_size
+        throw(DimensionMismatch("out size $(size(out)) ≠ (nbins, frame...) = $expected_size"))
     end
 
-    npix = prod(b.shape)
-    src  = frames isa AbstractDimArray ? parent(frames) : frames
-    X    = reshape(src, npix, :)
-    Y    = reshape(out, prod(output_size(b)), :)
+    src = frames isa AbstractDimArray ? parent(frames) : frames
+    mem = src isa PermutedDimsArray ? parent(src) : src
+    if !_is_contiguous(mem)
+        throw(ArgumentError("frames must be contiguous in memory, or a PermutedDimsArray of a contiguous array"))
+    end
 
-    @tasks for k in axes(X, 2)
-        @set begin
-            scheduler = scheduler
-            chunksize = chunksize
+    # Pixel `pix` of frame `k` is `vec(mem)[rowval[pix] + offsets[k]]`
+    s = strides(src)
+    frame_sz, frame_s = size(src)[1:nd_frame], s[1:nd_frame]
+    rowval = if frame_s == cumprod((1, frame_sz[1:end-1]...))
+        b.rowval
+    else
+        pixel_offset = [1 + _offset(I, frame_s) for I in CartesianIndices(frame_sz)]
+        pixel_offset[b.rowval]
+    end
+    offsets = vec([_offset(J, s[nd_frame+1:end]) for J in CartesianIndices(extra_shape)])
+
+    Y = reshape(out, prod(output_size(b)), :)
+    _integrate_frames!(Y, b, rowval, vec(mem), offsets, scheduler, chunksize)
+
+    _wrap(b, out, extra_shape, frames, nd_frame)
+end
+
+function _integrate_frames!(Y, b, rowval, x, offsets, scheduler, chunksize)
+    if length(offsets) == 1
+        _fused_spmv!(@view(Y[:, 1]), b, rowval, x, offsets[1])
+    else
+        @tasks for k in eachindex(offsets)
+            @set begin
+                scheduler = scheduler
+                chunksize = chunksize
+            end
+
+            _fused_spmv!(@view(Y[:, k]), b, rowval, x, offsets[k])
         end
-
-        _fused_spmv!(@view(Y[:, k]), b, @view(X[:, k]))
     end
-
-    _wrap(b, out, extra_shape, frames)
 end
 
 """
     integrate!(out::AbstractArray{Float32}, b, frames::AbstractArray;
                scheduler=:static, chunksize=nothing)
 
-Integrate `frames` of shape `(b.shape..., d_1, …, d_K)` into `out` of shape
-`(output_size(b)..., d_1, …, d_K)`, one frame per task via OhMyThreads. A
-single frame is integrated on the calling task. Returns a `DimArray` view
-wrapping `out`.
+Integrate `frames` of shape `(x, y, frame...)` into `out` of shape
+`(output_size(b)..., frame...)`, one frame per task via OhMyThreads. For a
+multi-module detector baked as `(x, module * y)` the frames can also be
+`(x, y, module, frame...)`.
+
+`frames` must be contiguous, or a `PermutedDimsArray` of a contiguous array,
+e.g. `PermutedDimsArray(data, (1, 2, 4, 3))` for module-major data. A single
+frame is integrated on the calling task. Returns a `DimArray` view wrapping
+`out`.
 """
 integrate!(args...; kwargs...) = _integrate!(args...; kwargs...)
 
