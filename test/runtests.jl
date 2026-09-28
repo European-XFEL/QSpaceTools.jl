@@ -201,6 +201,36 @@ end
     compare_result(got, ref_I; rtol=1e-4, atol=1e-4)
 end
 
+@testset "multi-module frame layouts" begin
+    # Test AGIPD-shaped data
+    x, y, nmodules, nframes, nnz = 128, 512, 16, 10, 100_000
+    raw = rand(Float32, nnz)
+    b = QST.BakedIntegrator(
+        Int32.(1:1000:nnz + 1), Int32.(rand(1:x * y * nmodules, nnz)),
+        raw, raw, Float32.(1:100), Float32[],
+        (x, nmodules * y), "", "", "", 100, 0, 1,
+    )
+
+    stacked = rand(Float32, x, y, nmodules, nframes)
+    ref = parent(QST.integrate(b, reshape(stacked, x, nmodules * y, nframes)))
+    @test parent(QST.integrate(b, stacked)) == ref
+
+    module_major = permutedims(stacked, (1, 2, 4, 3))
+    @test parent(QST.integrate(b, PermutedDimsArray(module_major, (1, 2, 4, 3)))) == ref
+    @test parent(QST.integrate(b, np.asarray(stacked).T)) == ref
+    @test parent(QST.integrate(b, PyArray(np.asarray(stacked)))) == ref
+
+    # Module-major C-order (module, frame, y, x) data, swapped to (frame, module, y, x)
+    np_module_major = np.asarray(module_major).T
+    @test parent(QST.integrate(b, np.swapaxes(np_module_major, 0, 1))) == ref
+
+    @test_throws ArgumentError QST.integrate(b, view(module_major, :, :, 1, :))
+    wide = np.asarray(rand(Float32, x + 1, y, nmodules, nframes)).T
+    gappy = @py wide[_:_, _:_, _:_, 0:x]
+    @test_throws ArgumentError QST.integrate(b, gappy)
+    @test_throws DimensionMismatch QST.integrate(b, rand(Float32, x, y, nmodules + 1))
+end
+
 @testset "load_baked()" begin
     # Test that load_baked() implementations match
     for npt in (800, (500, 180))

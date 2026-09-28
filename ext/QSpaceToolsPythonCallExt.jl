@@ -145,6 +145,16 @@ function get_py_array(frames::Py)
         throw(ArgumentError("frames array must be convertible to a PyArray, this type is not supported: $(python_class(frames))"))
     end
 
+    # A permuted view of a contiguous array, e.g. from `np.swapaxes`, becomes a
+    # PermutedDimsArray of the contiguous array
+    if !pyconvert(Bool, frames.flags.f_contiguous)
+        order = sortperm(pyconvert(Vector{Int}, frames.strides))
+        contiguous = frames.transpose(Tuple(order .- 1))
+        if pyconvert(Bool, contiguous.flags.f_contiguous)
+            return PermutedDimsArray(PyArray(contiguous), invperm(order))
+        end
+    end
+
     PyArray(frames)
 end
 
@@ -172,13 +182,21 @@ function QSpaceTools.rsm!(outputs::Union{AbstractArray{Float64, 3}, QSpaceTools.
     QSpaceTools._rsm!(outputs, get_py_array(frames, geom.data_shape), geom, args...; kwargs...)
 end
 
+function get_py_array(frames::py_types, b::QSpaceTools.BakedIntegrator)
+    if frames isa PyArray && !isnothing(QSpaceTools._frame_ndims(b, size(frames)))
+        frames
+    else
+        get_py_array(frames)
+    end
+end
+
 function QSpaceTools.integrate(b::QSpaceTools.BakedIntegrator, frames::py_types; kwargs...)
-    QSpaceTools._integrate(b, get_py_array(frames, b.shape); kwargs...)
+    QSpaceTools._integrate(b, get_py_array(frames, b); kwargs...)
 end
 
 function QSpaceTools.integrate!(out::AbstractArray{Float32}, b::QSpaceTools.BakedIntegrator,
                                 frames::py_types; kwargs...)
-    QSpaceTools._integrate!(out, b, get_py_array(frames, b.shape); kwargs...)
+    QSpaceTools._integrate!(out, b, get_py_array(frames, b); kwargs...)
 end
 
 end # module QSpaceToolsPythonCallExt
