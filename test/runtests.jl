@@ -14,11 +14,7 @@ ENV["JULIA_CONDAPKG_VERBOSITY"] = -1
 # ENV["JULIA_CONDAPKG_BACKEND"] = "Null"
 
 
-using Test
 using PythonCall
-using DimensionalData: dims, name
-using QSpaceTools: QSpaceTools as QST
-
 @py import sys
 sys.path.append(dirname(@__DIR__))
 
@@ -30,7 +26,24 @@ sys.path.append(dirname(@__DIR__))
     import xrayutilities as xu
     import xarray as xr
     import pytest
+    import h5py
 end
+
+# h5py and HDF5.jl link to libhdf5 builds with the same SONAME, so whichever is
+# loaded second would get the other's library. Point HDF5.jl at h5py's.
+using Libdl: dllist
+using Preferences: set_preferences!
+let loaded(name) = normpath(only(filter(p -> startswith(basename(p), "$name."), dllist())))
+    set_preferences!("HDF5",
+                     "libhdf5" => loaded("libhdf5"),
+                     "libhdf5_hl" => loaded("libhdf5_hl"); force=true)
+end
+
+using Test
+import Aqua
+using DimensionalData: dims, name
+using QSpaceTools: QSpaceTools as QST
+
 
 # A fresh fake detector image + configured AzimuthalIntegrator, as the
 # Python tests build in setUpClass. The image is cast to float32 and pyFAI's
@@ -649,4 +662,8 @@ end
 @testset "juliacall" begin
     # juliacall converts arguments differently from PythonCall so we need to test it explicitly
     @test pyconvert(Int, pytest.main(pylist([joinpath(@__DIR__, "test_juliacall.py")]))) == 0
+end
+
+@testset "Aqua" begin
+    Aqua.test_all(QST)
 end
