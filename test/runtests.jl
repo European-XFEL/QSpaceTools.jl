@@ -64,18 +64,9 @@ function compare_result(got, ref; rtol, atol)
     @test got[mask] ≈ ref[mask] rtol=rtol atol=atol
 end
 
-function test_integrator(; shape, npt0, npt1, ndim)
-    nbins = ndim == 2 ? npt0 * npt1 : npt0
-    QST.BakedIntegrator(
-        ones(Int32, nbins + 1), Int32[], Float32[], Float32[],
-        Float32.(1:npt0), Float32.(1:npt1),
-        shape, "", "", "", npt0, npt1, ndim,
-    )
-end
-
 @testset "allocate_output()" begin
-    b1 = test_integrator(shape=(8, 6), npt0=10, npt1=0, ndim=1)
-    b2 = test_integrator(shape=(8, 6), npt0=10, npt1=4, ndim=2)
+    b1 = QST._test_integrator(shape=(8, 6), npt0=10, npt1=0, ndim=1)
+    b2 = QST._test_integrator(shape=(8, 6), npt0=10, npt1=4, ndim=2)
 
     @test size(QST.allocate_output(b1, zeros(8, 6))) == (10,)
     @test size(QST.allocate_output(b2, zeros(8, 6))) == (10, 4)
