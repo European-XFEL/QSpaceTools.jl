@@ -4,14 +4,50 @@ using QSpaceTools: QSpaceTools
 using LinearAlgebra: normalize
 using PythonCall: Py, PyArray, PyIterable, pyconvert, pyimport, pyisinstance, pybuiltins, pytype
 
-# Build a BakedIntegrator from the `baked` dict returned by `bake_for_batch`,
-# skipping HDF5.
 function QSpaceTools.load_baked(baked::Py)
     if !pyisinstance(baked, pybuiltins.dict)
         throw(ArgumentError("load_baked(::Py) expected the dict returned by bake_for_batch, got a $(pytype(baked))"))
     end
 
-    QSpaceTools._baked_from((T, key) -> pyconvert(T, baked[key]))
+    dummy = pyconvert(Float32, baked["dummy"])
+    delta_dummy = pyconvert(Float32, baked["delta_dummy"])
+    if (isfinite(dummy) && dummy != 0) || (isfinite(delta_dummy) && delta_dummy != 0)
+        @warn "baked integrator has nonzero pyFAI dummy/delta_dummy; \
+               these are NOT applied here, so I(q) may differ from \
+               ai.integrate1d on pixels matching the dummy sentinel" dummy delta_dummy
+    end
+
+    ndim = pyconvert(Int, baked["ndim"])
+    shape_c = pyconvert(Vector{Int}, baked["shape"])
+    if length(shape_c) != 2
+        error("only 2D detector shapes are supported here, got $shape_c")
+    end
+    H, W = shape_c
+
+    bin_centers1, unit1, npt1 = if ndim == 2
+        (pyconvert(Vector{Float32}, baked["bin_centers1"]),
+         pyconvert(String, baked["unit1"]),
+         pyconvert(Int, baked["npt1"]))
+    else
+        Float32[], "", 0
+    end
+
+    # Reversed so that `vec(frame)` matches pyFAI's C-order pixel indices
+    QSpaceTools.BakedIntegrator(;
+        colptr=pyconvert(Vector{Int32}, baked["indptr"]) .+ Int32(1),
+        rowval=pyconvert(Vector{Int32}, baked["indices"]) .+ Int32(1),
+        raw_nz=pyconvert(Vector{Float32}, baked["data_raw"]),
+        corr_nz=pyconvert(Vector{Float32}, baked["data_corr"]),
+        bin_centers0=pyconvert(Vector{Float32}, baked["bin_centers0"]),
+        bin_centers1,
+        shape=(W, H),
+        unit0=pyconvert(String, baked["unit0"]),
+        unit1,
+        split=pyconvert(String, baked["split"]),
+        npt0=pyconvert(Int, baked["npt0"]),
+        npt1,
+        ndim,
+    )
 end
 
 _bake_module::Union{Py, Nothing} = nothing

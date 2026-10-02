@@ -3,7 +3,6 @@ module QSpaceTools
 export Geometry, rss, rss!, rsm, rsm!, RSMWorkspace, RSMAccumulator, QProjections,
        allocate_output, q_bounds
 
-using HDF5: h5open, read_attribute
 using DimensionalData: Dim, DimArray, AbstractDimArray, otherdims
 using LinearAlgebra: normalize
 using OhMyThreads: @tasks, @set, tmapreduce, index_chunks
@@ -15,9 +14,25 @@ include("geometry.jl")
 include("gridder.jl")
 include("rss.jl")
 
+function _test_integrator(; shape, npt0, npt1, ndim)
+    nbins = ndim == 2 ? npt0 * npt1 : npt0
+    BakedIntegrator(
+        ones(Int32, nbins + 1), Int32[], Float32[], Float32[],
+        Float32.(1:npt0), Float32.(1:npt1),
+        shape, "", "", "", npt0, npt1, ndim,
+    )
+end
+
 @compile_workload begin
     images = rand(10, 10, 3)
 
+    # 1D/2D integration
+    b = _test_integrator(shape=(10, 10), npt0=10, npt1=0, ndim=1)
+    integrate(b, images)
+    b = _test_integrator(shape=(10, 10), npt0=10, npt1=4, ndim=2)
+    integrate(b, images)
+
+    # RSM/RSS functions
     sample_axes = ("y-", "x-", "z+")
     detector_axes = ("y-",)
     image_axes = ("z-", "y-")

@@ -16,9 +16,8 @@ const Frame     = Dim{:frame}
 An integrator baked from a configured `pyFAI.AzimuthalIntegrator`. Holds the
 frozen CSR sparse matrix and correction weights for either 1D or 2D azimuthal
 integration, along with the bin centres and unit strings for the output axes.
-Construct one with [`load_baked`](@ref), or directly from an integrator with
-`BakedIntegrator(ai, npt; kwargs...)` when PythonCall is loaded, and apply it
-with [`integrate`](@ref).
+Construct one from an integrator with `BakedIntegrator(ai, npt; kwargs...)`
+when PythonCall is loaded, and apply it with [`integrate`](@ref).
 """
 @kwdef struct BakedIntegrator
     # pyFAI's CSR arrays, shifted to 1-based
@@ -58,75 +57,14 @@ function Base.hash(b::BakedIntegrator, h::UInt)
     h
 end
 
-# `get(T, key)` reads one field from an HDF5 file or Python dict.
-function _baked_from(get)
-    version = get(Int, "format_version")
-    if version != 2
-        error("unsupported baked integrator format_version $version, re-bake with the current bake_for_batch.py")
-    end
-
-    dummy = get(Float32, "dummy")
-    delta_dummy = get(Float32, "delta_dummy")
-    if (isfinite(dummy) && dummy != 0) || (isfinite(delta_dummy) && delta_dummy != 0)
-        @warn "baked integrator has nonzero pyFAI dummy/delta_dummy; \
-               these are NOT applied here, so I(q) may differ from \
-               ai.integrate1d on pixels matching the dummy sentinel" dummy delta_dummy
-    end
-
-    ndim    = get(Int, "ndim")
-    shape_c = get(Vector{Int}, "shape")
-    length(shape_c) == 2 ||
-        error("only 2D detector shapes are supported here, got $shape_c")
-    H, W = shape_c
-
-    bin_centers1, unit1, npt1 = if ndim == 2
-        get(Vector{Float32}, "bin_centers1"), get(String, "unit1"), get(Int, "npt1")
-    else
-        Float32[], "", 0
-    end
-
-    # Reversed so that `vec(frame)` matches pyFAI's C-order pixel indices
-    BakedIntegrator(;
-        colptr=get(Vector{Int32}, "indptr") .+ Int32(1),
-        rowval=get(Vector{Int32}, "indices") .+ Int32(1),
-        raw_nz=get(Vector{Float32}, "data_raw"),
-        corr_nz=get(Vector{Float32}, "data_corr"),
-        bin_centers0=get(Vector{Float32}, "bin_centers0"),
-        bin_centers1,
-        shape=(W, H),
-        unit0=get(String, "unit0"),
-        unit1,
-        split=get(String, "split"),
-        npt0=get(Int, "npt0"),
-        npt1,
-        ndim,
-    )
-end
-
-# Stored as HDF5 attributes; everything else is a dataset.
-const _BAKED_ATTRS = ("shape", "ndim", "unit0", "unit1", "split", "npt0", "npt1",
-                      "format_version", "dummy", "delta_dummy")
-
 """
-    load_baked(path::AbstractString)
+    load_baked(baked)
 
-Load a [`BakedIntegrator`](@ref) from an HDF5 file written by
-`bake_for_batch.write_hdf5(...)`. Warns if the bake has a nonzero
-`dummy`/`delta_dummy`, since the dummy mask is not applied.
+Build a [`BakedIntegrator`](@ref) from the dict returned by `bake_for_batch()`
+in `bake_for_batch.py`. Needs PythonCall to be loaded. Warns if the bake has a
+nonzero `dummy`/`delta_dummy`, since the dummy mask is not applied.
 """
-function load_baked(path::AbstractString)
-    h5open(path, "r") do f
-        get(::Type{T}, key) where {T} =
-            if key in _BAKED_ATTRS
-                raw = read_attribute(f, key)
-                raw isa T ? raw : T(raw)
-            else
-                read(f[key])::T
-            end
-
-        _baked_from(get)
-    end
-end
+function load_baked end
 
 function _meta(b::BakedIntegrator)
     md = Dict("unit0" => b.unit0, "split" => b.split)

@@ -1,7 +1,7 @@
 """
-Bake a pyFAI azimuthal integrator into a self-contained CSR artifact for
-repeated integration in another language (Julia, C++, …) without re-running
-pyFAI's geometry layer per frame.
+Bake a pyFAI azimuthal integrator into a self-contained dict of CSR arrays
+for repeated integration in Julia without re-running pyFAI's geometry layer
+per frame.
 
 `npt=int` selects 1D (radial); `npt=(nrad, nazim)` selects 2D, with rows
 packed as `row = bin_azim * nrad + bin_rad` so that radial is the fastest
@@ -58,10 +58,10 @@ For 2D the math is identical — same matrix, more rows. Reshape the flat
 pyFAI's `integrate2d`) or `(nrad, nazim, …)` in Julia; both are zero-copy.
 
 ------------------------------------------------------------------------------
-On-disk layout (HDF5, format_version = 2)
+Baked dict layout
 ------------------------------------------------------------------------------
 
-Datasets:
+Arrays:
   data_raw     float32 (nnz,)      A_raw values
   data_corr    float32 (nnz,)      A_corr values (= A_raw * corr[col])
   indices      int32   (nnz,)      0-based column indices, C-order pixel index
@@ -69,26 +69,21 @@ Datasets:
   bin_centers0 float32 (nbins0,)   radial axis, in `unit0`'s display scale
   bin_centers1 float32 (nbins1,)   azimuthal axis (only present if ndim == 2)
 
-Attributes:
-  shape           int64[2]  detector shape in pyFAI/C order (H, W)
-  ndim            int       1 or 2
-  unit0           str       pyFAI radial unit string
-  unit1           str       pyFAI azimuthal unit string (only if ndim == 2)
-  split           str       pixel-splitting scheme used at bake
-  npt0            int       number of radial bins
-  npt1            int       number of azimuthal bins (only if ndim == 2)
-  format_version  int       2
+Scalars:
+  shape        (int, int)  detector shape in pyFAI/C order (H, W)
+  ndim         int         1 or 2
+  unit0        str         pyFAI radial unit string
+  unit1        str         pyFAI azimuthal unit string (only if ndim == 2)
+  split        str         pixel-splitting scheme used at bake
+  npt0         int         number of radial bins
+  npt1         int         number of azimuthal bins (only if ndim == 2)
+  dummy        float32     the detector's DUMMY (not applied)
+  delta_dummy  float32     the detector's DELTA_DUMMY (not applied)
 """
 
-import argparse
-
 import numpy as np
-import pyFAI
 from scipy.sparse import csr_matrix
 from pyFAI import units as pyFAI_units
-
-
-FORMAT_VERSION = 2
 
 
 def _split_npt_unit(npt, unit):
@@ -214,37 +209,12 @@ def bake_for_batch(ai, npt, *,
         # persist the values for the consumer.
         "dummy": np.float32(getattr(ai.detector, "DUMMY", np.nan)),
         "delta_dummy": np.float32(getattr(ai.detector, "DELTA_DUMMY", np.nan)),
-        "format_version": FORMAT_VERSION,
     }
     if ndim == 2:
         out["bin_centers1"] = bin_centers1
         out["unit1"] = unit1_str
         out["npt1"] = int(npt1)
     return out
-
-
-def write_hdf5(baked, path):
-    """Write a baked dict to an HDF5 file."""
-    import h5py
-
-    with h5py.File(path, "w") as f:
-        for key in ("data_raw", "data_corr", "indices", "indptr",
-                    "bin_centers0"):
-            f.create_dataset(key, data=baked[key], compression="gzip")
-        if baked["ndim"] == 2:
-            f.create_dataset("bin_centers1", data=baked["bin_centers1"],
-                             compression="gzip")
-        f.attrs["shape"] = np.asarray(baked["shape"], dtype=np.int64)
-        f.attrs["ndim"] = baked["ndim"]
-        f.attrs["unit0"] = baked["unit0"]
-        f.attrs["split"] = baked["split"]
-        f.attrs["npt0"] = baked["npt0"]
-        if baked["ndim"] == 2:
-            f.attrs["unit1"] = baked["unit1"]
-            f.attrs["npt1"] = baked["npt1"]
-        f.attrs["dummy"] = baked["dummy"]
-        f.attrs["delta_dummy"] = baked["delta_dummy"]
-        f.attrs["format_version"] = baked["format_version"]
 
 
 def integrate(baked, image):
@@ -301,19 +271,3 @@ def integrate(baked, image):
             return I.reshape(nbins1, nbins0)
         return I.reshape(nbins1, nbins0, batch_shape)
     return I
-
-def main():
-    parser = argparse.ArgumentParser(
-        description="Bake a pyFAI integrator from a PONI file to HDF5.")
-    parser.add_argument("poni_path", help="Path to the PONI file")
-    parser.add_argument("npt", type=int, help="Number of radial bins")
-    parser.add_argument("output_path", help="Output HDF5 file path")
-    args = parser.parse_args()
-
-    ai = pyFAI.load(args.poni_path)
-    baked = bake_for_batch(ai, args.npt)
-    write_hdf5(baked, args.output_path)
-
-
-if __name__ == "__main__":
-    main()
