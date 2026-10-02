@@ -3,7 +3,6 @@ module QSpaceTools
 export Geometry, rss, rss!, rsm, rsm!, RSMWorkspace, RSMAccumulator, QProjections,
        allocate_output, q_bounds
 
-using HDF5: h5open, read_attribute
 using DimensionalData: Dim, DimArray, AbstractDimArray, otherdims
 using LinearAlgebra: normalize
 using OhMyThreads: @tasks, @set, tmapreduce, index_chunks

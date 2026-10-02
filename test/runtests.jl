@@ -22,21 +22,10 @@ sys.path.append(dirname(@__DIR__))
     import numpy as np
     import pyFAI
     import pyFAI.test.utilstest: create_fake_data
-    import bake_for_batch: bake_for_batch, write_hdf5
+    import bake_for_batch: bake_for_batch
     import xrayutilities as xu
     import xarray as xr
     import pytest
-    import h5py
-end
-
-# h5py and HDF5.jl link to libhdf5 builds with the same SONAME, so whichever is
-# loaded second would get the other's library. Point HDF5.jl at h5py's.
-using Libdl: dllist
-using Preferences: set_preferences!
-let loaded(name) = normpath(only(filter(p -> startswith(basename(p), "$name."), dllist())))
-    set_preferences!("HDF5",
-                     "libhdf5" => loaded("libhdf5"),
-                     "libhdf5_hl" => loaded("libhdf5_hl"); force=true)
 end
 
 using Test
@@ -232,17 +221,9 @@ end
 end
 
 @testset "load_baked()" begin
-    # Test that load_baked() implementations match
     for npt in (800, (500, 180))
         image, ai = fake_data()
         baked = bake_for_batch(ai, npt; unit="2th_deg", split="bbox")
-
-        mktempdir() do td
-            path = joinpath(td, "setup.h5")
-            write_hdf5(baked, path)
-            @test QST.load_baked(path) == QST.load_baked(baked)
-        end
-
         @test QST.BakedIntegrator(ai, npt; unit="2th_deg", split="bbox") == QST.load_baked(baked)
     end
 
