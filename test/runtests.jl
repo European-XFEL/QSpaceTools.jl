@@ -668,8 +668,11 @@ end
 end
 
 @testset "juliacall" begin
-    # juliacall converts arguments differently from PythonCall so we need to test it explicitly
-    @test pyconvert(Int, pytest.main(pylist([joinpath(@__DIR__, "test_juliacall.py")]))) == 0
+    # juliacall converts arguments differently from PythonCall so we need to test it explicitly.
+    # pytest's faulthandler plugin intercepts the SIGSEGVs Julia uses for GC
+    # safepoints and turns them into fatal errors, so it must be disabled.
+    args = [joinpath(@__DIR__, "test_juliacall.py"), "-p", "no:faulthandler"]
+    @test pyconvert(Int, pytest.main(pylist(args))) == 0
 end
 
 @testset "Aqua" begin
