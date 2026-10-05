@@ -83,7 +83,8 @@ end
 # are the pyFAI entry point, the `npt` argument, and the result rank;
 # everything else — fake data, polarization, bin-center checks, comparison —
 # is shared.
-function check_split(split; ndim, with_pol=false, azimuth_range=nothing)
+function check_split(split; ndim, with_pol=false, radial_range=nothing,
+                     azimuth_range=nothing)
     image, ai = fake_data()
     unit = "q_A^-1"
     pol = with_pol ? 0.97 : nothing
@@ -93,12 +94,13 @@ function check_split(split; ndim, with_pol=false, azimuth_range=nothing)
     ref = if ndim == 1
         ai.integrate1d(image; npt, unit, method=(split, "csr", "cython"),
                        correctSolidAngle=true, dummy=np.nan,
-                       polarization_factor=pol, azimuth_range)
+                       polarization_factor=pol, radial_range, azimuth_range)
     else
         npt_rad, npt_azim = npt
         ai.integrate2d(image; npt_rad, npt_azim, unit,
                        method=(split, "csr", "cython"), correctSolidAngle=true,
-                       dummy=np.nan, polarization_factor=pol, azimuth_range)
+                       dummy=np.nan, polarization_factor=pol, radial_range,
+                       azimuth_range)
     end
 
     # 2D intensity is (npt_azim, npt_rad) and the Julia output is (npt0, npt1)
@@ -107,7 +109,7 @@ function check_split(split; ndim, with_pol=false, azimuth_range=nothing)
                         pyconvert(Matrix, ref.intensity.T)
 
     baked = bake_for_batch(ai, npt; unit, split, solidangle=true,
-                           polarization_factor=pol, azimuth_range)
+                           polarization_factor=pol, radial_range, azimuth_range)
     @test pyconvert(Int, baked["ndim"]) == ndim
     @test pyconvert(Vector, baked["bin_centers0"]) ≈ ref_q rtol=1e-6
     if ndim == 2
@@ -149,6 +151,10 @@ end
 
     @testset "with polarization (bbox)" begin
         check_split("bbox"; ndim, with_pol=true)
+    end
+
+    @testset "with radial_range (bbox)" begin
+        check_split("bbox"; ndim, radial_range=(0.1, 0.4))
     end
 
     if ndim == 1
