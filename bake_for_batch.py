@@ -127,8 +127,13 @@ def bake_for_batch(ai, npt, *,
     npix = int(np.prod(shape))
 
     ndim, npt_arg, unit_arg, unit0_str, unit1_str = _split_npt_unit(npt, unit)
+    unit0_obj = pyFAI_units.to_unit(unit0_str)
 
     detector_mask = ai.detector.mask
+    # With scale=False both ranges must be in internal units, converted the
+    # same way integrate1d_ng/integrate2d_ng do.
+    pos0_range = (tuple(radial_range[i] / unit0_obj.scale for i in (0, -1))
+                  if radial_range is not None else None)
     # azimuth_range is in degrees; pos1_range expects radians (and the
     # discontinuity-aware shifted range).
     pos1_range = (ai.normalize_azimuth_range(azimuth_range)
@@ -137,7 +142,7 @@ def bake_for_batch(ai, npt, *,
         shape=shape,
         npt=npt_arg,
         mask=detector_mask,
-        pos0_range=radial_range,
+        pos0_range=pos0_range,
         pos1_range=pos1_range,
         unit=unit_arg,
         split=split,
@@ -159,7 +164,6 @@ def bake_for_batch(ai, npt, *,
 
     # setup_sparse_integrator stores bin centers in S.I. units; rescale to
     # match integrateNd_ng's display axes.
-    unit0_obj = pyFAI_units.to_unit(unit0_str)
     if ndim == 1:
         bin_centers0 = (np.asarray(integ.bin_centers, dtype=np.float32)
                         * np.float32(unit0_obj.scale))
