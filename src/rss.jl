@@ -204,15 +204,14 @@ function _frame_q!(q::AbstractMatrix, geom::Geometry, indices::NTuple{D, Int},
     return q
 end
 
-# Global q-extrema over all frames, one frame's q resident at a time. Needs
-# only the geometry and angles, not the frame data.
-function _q_bounds(q::AbstractMatrix, geom::Geometry, indices::NTuple{D, Int},
-                        sample_angles::AbstractVector, detector_angles::AbstractVector,
-                        ntasks) where {D}
+# Global q-extrema over all frames, from the geometry and angles alone.
+function _q_bounds(geom::Geometry, indices::NTuple{D, Int},
+                   sample_angles::AbstractVector, detector_angles::AbstractVector,
+                   ntasks) where {D}
     bounds = (ntuple(_ -> Inf, Val(D)), ntuple(_ -> -Inf, Val(D)))
     for (sa, da) in zip(sample_angles, detector_angles)
-        points = _frame_q!(q, geom, indices, sa, da, ntasks)
-        bounds = _combine_bounds(bounds, _point_bounds(points, Val(D), ntasks))
+        ft = FrameTransform(geom, sa, da)
+        bounds = _combine_bounds(bounds, _q_extrema(geom, ft, indices; ntasks))
     end
     return bounds
 end
@@ -238,9 +237,8 @@ function q_bounds(geom::Geometry; sample_angles, detector_angles,
     else
         Int(nframes)
     end
-    q = Matrix{Float64}(undef, length(indices), npixels(geom))
-    mins, maxs = _q_bounds(q, geom, indices, _frame_angles(sample_angles, n),
-                                _frame_angles(detector_angles, n), ntasks)
+    mins, maxs = _q_bounds(geom, indices, _frame_angles(sample_angles, n),
+                           _frame_angles(detector_angles, n), ntasks)
     return _flatten_bounds(mins, maxs)
 end
 
@@ -509,20 +507,26 @@ function _accumulate_frames!(indices::NTuple{D, Int}, frames::AbstractArray,
                           detector_angles, bounds, fuzzy_width,
                           ntasks::Integer) where {D}
     nframes = _check_frames(geom, frames)
+    sa = _frame_angles(sample_angles, nframes)
+    da = _frame_angles(detector_angles, nframes)
+    # A single frame's q is computed once and used for both the bounds and the
+    # accumulation.
+    reuse_q = isnothing(bounds) && nframes == 1
 
-    mins, maxs = if isnothing(bounds)
-        _q_bounds(ws.q_buffer, geom, indices, _frame_angles(sample_angles, nframes),
-                       _frame_angles(detector_angles, nframes), ntasks)
+    mins, maxs = if reuse_q
+        q = _frame_q!(ws.q_buffer, geom, indices, sa[1], da[1], ntasks)
+        _point_bounds(q, Val(D), ntasks)
+    elseif isnothing(bounds)
+        _q_bounds(geom, indices, sa, da, ntasks)
     else
         _split_bounds(bounds, Val(D))
     end
     acc = RSMAccumulator(geom, ws, indices, mins, maxs; fuzzy_width, ntasks)
 
-    if isnothing(bounds) && nframes == 1
-        # A single-frame bounds scan leaves that frame's q in the buffer.
+    if reuse_q
         _accumulate!(acc, vec(frames))
     else
-        append!(acc, frames; sample_angles, detector_angles)
+        append!(acc, frames; sample_angles=sa, detector_angles=da)
     end
     return acc
 end
