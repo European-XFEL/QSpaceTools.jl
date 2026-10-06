@@ -584,6 +584,44 @@ end
     @test_throws DimensionMismatch QST.Geometry(positions, (nch1, nch2 + 1); common...)
 end
 
+@testset "Geometry from EXtra-geom matches the assembled image" begin
+    # This is `.example()`'s quad positions, but rounded to whole pixels to
+    # avoid snapping inaccuracies that would the tests complicated.
+    eg_geom = AGIPD_1MGeometry.from_quad_positions(
+        pylist([(-525, 625), (-550, -10), (520, -160), (542, 475)]))
+    distance = 0.4
+    common = (; distance, sample_axes=("y-", "x+", "z+"), detector_axes=("y-",),
+                beam_direction=(1.0, 0.0, 0.0),
+                wavelength=QST.energy2wavelength(9300.0))
+    angles = (; sample_angles=(16.5, 0.05, -0.10), detector_angles=(35.5,))
+
+    geom = QST.Geometry(eg_geom; common...)
+    @test geom.data_shape == (128, 512, 16)
+    @test geom.image_axes == (QST.parse_axis("y+"), QST.parse_axis("z+"))
+
+    data = np.random.rand(16, 512, 128)
+    image, centre = eg_geom.position_modules(data)
+    # `centre` is the (y, x) index of the beam position in pixel corners, hence
+    # the -0.5 to get pixel centres.
+    px = pyconvert(Float64, eg_geom.pixel_size)
+    assembled = QST.Geometry(; common..., image_axes=("y+", "z+"),
+                             pixel_size=(px, px),
+                             center=reverse(pyconvert(Vector{Float64}, centre)) .- 0.5,
+                             shape=reverse(pyconvert(NTuple{2, Int}, image.shape)))
+
+    # Padded so rounding differences between the two geometries can't push an
+    # edge pixel out of range.
+    bounds = QST.q_bounds(assembled; projection=(:qx, :qz), angles...) .+
+             (-1, 1, -1, 1) .* 1e-6
+    kwargs = (; angles..., bounds, gridder_size=(200, 200))
+    @test QST.rss(pyconvert(Array{Float64, 3}, data.T), geom; kwargs...) ≈
+          QST.rss(pyconvert(Matrix{Float64}, image.T), assembled; kwargs...) rtol=1e-10
+
+    common = (; distance, sample_axes=("y-",), detector_axes=("y-",), wavelength=1.0)
+    @test_throws ArgumentError QST.Geometry(eg_geom; beam_direction=(0.0, 0.0, 1.0), common...)
+    @test_throws ArgumentError QST.Geometry(np.zeros(3); beam_direction=(1.0, 0.0, 0.0), common...)
+end
+
 @testset "fuzzygridder! matches xu.FuzzyGridder3D" begin
     # Python grids (nx, ny, nz) row-major; Julia grids (nz, ny, nx)
     # column-major, so both languages iterate the same fast axis. Julia

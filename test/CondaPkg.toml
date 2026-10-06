@@ -7,3 +7,6 @@ xrayutilities = ""
 xarray = ""
 pyjuliacall = ""
 pytest = ""
+
+[pip.deps]
+extra_geom = ""
