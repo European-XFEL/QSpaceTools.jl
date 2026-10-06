@@ -26,6 +26,7 @@ sys.path.append(dirname(@__DIR__))
     import xrayutilities as xu
     import xarray as xr
     import pytest
+    import extra_geom: AGIPD_1MGeometry
 end
 
 using Test
@@ -510,6 +511,11 @@ end
     # The scan reads no frame data, so it can fix the grid before any image is
     # loaded.
     bounds = QST.q_bounds(geom; sample_angles, detector_angles)
+
+    # Sanity check that the q_bounds() fast path does the right thing
+    q = stack(QST.pixel_q_array(geom, sa, detector_angles) for sa in sample_angles)
+    @test bounds == Tuple(f(q[c, :, :, :]) for c in 1:3 for f in (minimum, maximum))
+    @test QST.q_bounds(geom; sample_angles, detector_angles, projection=(:qy, :qz)) == bounds[3:6]
 
     for output in (:projections, :volume)
         ref = QST.rsm(frames, geom; sample_angles, detector_angles,

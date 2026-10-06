@@ -243,6 +243,37 @@ function FrameTransform(g::Geometry, sample_angles, detector_angles)
     return FrameTransform(f * (ms * md), -f * (ms * r_i_unit))
 end
 
+# The rows `indices` of the transform, as a `D×3` matrix and a `D`-vector
+function _project_transform(ft::FrameTransform, indices::NTuple{D, Int}) where {D}
+    M = ft.m_combined
+    # `k` walks column-major: row = mod1(k, D), col = cld(k, D).
+    m_proj = SMatrix{D, 3, Float64, D * 3}(
+        ntuple(k -> @inbounds(M[indices[mod1(k, D)], cld(k, D)]), Val(D * 3))
+    )
+    qo = SVector{D, Float64}(ntuple(k -> ft.q_offset[indices[k]], Val(D)))
+    return m_proj, qo
+end
+
+# Per-component `(mins, maxs)` of the q-components `indices` over every pixel,
+# without storing q.
+function _q_extrema(g::Geometry, ft::FrameTransform, indices::NTuple{D, Int};
+                    ntasks::Integer=4) where {D}
+    m_proj, qo = _project_transform(ft, indices)
+    dirs = g.directions
+
+    tmapreduce(_combine_bounds, index_chunks(1:npixels(g); n=ntasks);
+               scheduler=:static) do rng
+        lo = SVector{D, Float64}(ntuple(_ -> Inf, Val(D)))
+        hi = -lo
+        @inbounds for k in rng
+            v = m_proj * Vec3(dirs[1, k], dirs[2, k], dirs[3, k]) + qo
+            lo = @fastmath min.(lo, v)
+            hi = @fastmath max.(hi, v)
+        end
+        (Tuple(lo), Tuple(hi))
+    end
+end
+
 # Fill `q_buffer` (`(D, npix)`) with the q-components `indices` of every
 # pixel, projecting the transform to a `D×3` matrix once ahead of the loop.
 function _compute_q!(q_buffer::AbstractMatrix{Float64},
@@ -252,12 +283,7 @@ function _compute_q!(q_buffer::AbstractMatrix{Float64},
     if size(q_buffer) != (D, npix)
         throw(DimensionMismatch("workspace q_buffer $(size(q_buffer)) != ($D, $npix)"))
     end
-    M = ft.m_combined
-    # `k` walks column-major: row = mod1(k, D), col = cld(k, D).
-    m_proj = SMatrix{D, 3, Float64, D * 3}(
-        ntuple(k -> @inbounds(M[indices[mod1(k, D)], cld(k, D)]), Val(D * 3))
-    )
-    qo = SVector{D, Float64}(ntuple(k -> ft.q_offset[indices[k]], Val(D)))
+    m_proj, qo = _project_transform(ft, indices)
     dirs = g.directions
 
     # Explicit inner loop per chunk: `@tasks` over `1:npix` would call the body
