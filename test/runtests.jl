@@ -597,14 +597,14 @@ end
 
     geom = QST.Geometry(eg_geom; common...)
     @test geom.data_shape == (128, 512, 16)
-    @test geom.image_axes == (QST.parse_axis("y+"), QST.parse_axis("z+"))
+    @test geom.image_axes == (QST.parse_axis("z-"), QST.parse_axis("y+"))
 
     data = np.random.rand(16, 512, 128)
     image, centre = eg_geom.position_modules(data)
     # `centre` is the (y, x) index of the beam position in pixel corners, hence
     # the -0.5 to get pixel centres.
     px = pyconvert(Float64, eg_geom.pixel_size)
-    assembled = QST.Geometry(; common..., image_axes=("y+", "z+"),
+    assembled = QST.Geometry(; common..., image_axes=("z-", "y+"),
                              pixel_size=(px, px),
                              center=reverse(pyconvert(Vector{Float64}, centre)) .- 0.5,
                              shape=reverse(pyconvert(NTuple{2, Int}, image.shape)))
