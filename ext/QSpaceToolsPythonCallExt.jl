@@ -101,15 +101,17 @@ python_class(obj::Py) = string(obj.__class__.__qualname__)
 
 """
     Geometry(geom; distance, sample_axes, detector_axes, beam_direction,
-             wavelength, extra_geom_axes=("y+", "z+", "x+"), center=nothing,
+             wavelength, extra_geom_axes=("z-", "y+", "x+"), center=nothing,
              sample_normal=nothing, sample_faceup=nothing)
 
 Build a [`Geometry`](@ref) from an EXtra-geom detector geometry, one position
 per pixel, so multi-module detectors need no assembly.
 
 `extra_geom_axes` gives the lab-frame directions of EXtra-geom's `(x, y, z)`
-axes, in the same notation as the other axis arguments. EXtra-geom's `z` is its
-beam axis, so the third entry must agree with `beam_direction`.
+axes, in the same notation as the other axis arguments. EXtra-geom's `x` points
+left looking along the beam, `y` up and `z` along the beam, so the third entry
+must agree with `beam_direction`. The default is for a lab frame with `x+`
+along the beam, `y+` up and `z+` to the right looking along the beam.
 
 `distance` is the sample-detector distance **in metres**: EXtra-geom's `z`
 coordinates are only relative module offsets, so it is added along the beam
@@ -127,7 +129,7 @@ function QSpaceTools.Geometry(geom::Py;
                               detector_axes,
                               beam_direction,
                               wavelength,
-                              extra_geom_axes=("y+", "z+", "x+"),
+                              extra_geom_axes=("z-", "y+", "x+"),
                               center=nothing,
                               sample_normal=nothing,
                               sample_faceup=nothing)
